@@ -30,15 +30,19 @@ type Repository struct {
 	filePattern *regexp.Regexp
 	owner       string
 	name        string
+	username    string
+	apiToken    string
 }
 
-func New(url string, dir string, regex string, format string, filePattern string) *Repository {
+func New(url string, dir string, regex string, format string, filePattern string, username string, apiToken string) *Repository {
 	var repo Repository
 
 	repo.regexp = regexp.MustCompile(regex)
 	repo.format = format
 	repo.filePattern = regexp.MustCompile(filePattern)
 	repo.dir = dir
+	repo.username = username
+	repo.apiToken = apiToken
 	owner, name, err := splitUrl(url)
 	if err != nil {
 		return nil
@@ -50,6 +54,19 @@ func New(url string, dir string, regex string, format string, filePattern string
 	err = os.MkdirAll(dir, 0700)
 	if err != nil {
 		fmt.Printf("Failed to create dir %s: %s\n", dir, err)
+		return nil
+	}
+
+	/* switch to it */
+	d, err := os.Open(dir)
+	if err != nil {
+		fmt.Printf("%s\n", err)
+		return nil
+	}
+	err = d.Chdir()
+	d.Close()
+	if err != nil {
+		fmt.Printf("%s\n", err)
 		return nil
 	}
 
@@ -74,12 +91,10 @@ func New(url string, dir string, regex string, format string, filePattern string
 	return &repo
 }
 
-func (repo *Repository) Run(tag string) {
-	githubApiToken := "xxx"
-	githubUsername := "jacksgt"
+func (repo *Repository) Run(tag string) (err error) {
 
 	/* fetch updates */
-	err := repo.r.Fetch(&git.FetchOptions{Depth: 1})
+	err = repo.r.Fetch(&git.FetchOptions{})
 	if err != nil && err != git.NoErrAlreadyUpToDate {
 		fmt.Printf("Failed to fetch repo: %s\n", err)
 		return
@@ -111,15 +126,31 @@ func (repo *Repository) Run(tag string) {
 	}
 
 	/* updated version */
-	// repo.updateVersionInAllDockerfiles(tag)
-	err = repo.execUpdater(tag)
+	files := repo.updateVersionInAllDockerfiles(tag)
+	// err = repo.execUpdater(tag)
 	if err != nil {
 		fmt.Printf("Failed to execute: %s\n", err)
 		return
 	}
 
-	/* add all changed files to staging area */
-	w.Add("*")
+	if len(files) == 0 {
+		fmt.Printf("Error: no files modified!\n")
+		return
+	}
+
+	for _, f := range files {
+		w.Add(f)
+	}
+
+	status, err := w.Status()
+	if err != nil {
+		fmt.Printf("%s", err)
+		return
+	}
+	if status.IsClean() {
+		fmt.Printf("Error: no files modified!\n")
+		return
+	}
 
 	/* commit */
 	commit, err := w.Commit("Update to tag "+tag, &git.CommitOptions{
@@ -145,8 +176,8 @@ func (repo *Repository) Run(tag string) {
 
 	/* push branch */
 	auth := http.BasicAuth{
-		Username: githubUsername,
-		Password: githubApiToken,
+		Username: repo.username,
+		Password: repo.apiToken,
 	}
 
 	upstreamReference := plumbing.ReferenceName("refs/heads/" + branchName)
@@ -167,7 +198,7 @@ func (repo *Repository) Run(tag string) {
 
 	/* create PR */
 	ts := &tokenSource{
-		&oauth2.Token{AccessToken: githubApiToken},
+		&oauth2.Token{AccessToken: repo.apiToken},
 	}
 	tc := oauth2.NewClient(oauth2.NoContext, ts)
 	client := github.NewClient(tc)
@@ -213,18 +244,21 @@ func (repo *Repository) execUpdater(tag string) (err error) {
 	return nil
 }
 
-func (repo *Repository) updateVersionInAllDockerfiles(version string) {
-	newLine := []byte(fmt.Sprintf(repo.format, version))
+func (repo *Repository) updateVersionInAllDockerfiles(version string) (files []string) {
+	newLine := fmt.Sprintf(repo.format, version)
 
-	/* replace "ARG [v|V]ersion[ ]=[ ][']*[']" with "ARG version='tag'" */
+	/* replace regex */
 	callback := func(path string, fi os.FileInfo, err error) error {
 		if fi.IsDir() {
 			return nil
 		}
 
-		if !repo.filePattern.MatchString(path) {
+		if !repo.filePattern.MatchString(fi.Name()) {
 			return nil
 		}
+
+		fmt.Printf("Found Dockerfile: '%s'\n", fi.Name())
+		files = append(files, path)
 
 		lines, err := readLines(path)
 		if err != nil {
@@ -233,8 +267,8 @@ func (repo *Repository) updateVersionInAllDockerfiles(version string) {
 		}
 
 		/* loop over all lines */
-		for _, l := range lines {
-			repo.regexp.ReplaceAll([]byte(l), newLine)
+		for n, l := range lines {
+			lines[n] = repo.regexp.ReplaceAllString(l, newLine)
 		}
 
 		err = writeLines(lines, path)
@@ -248,6 +282,7 @@ func (repo *Repository) updateVersionInAllDockerfiles(version string) {
 	/* go through all files in repository */
 	filepath.Walk(".", callback)
 
+	return files
 }
 
 func readLines(path string) ([]string, error) {
