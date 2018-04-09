@@ -29,7 +29,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	fmt.Printf("%+v\n", cfg)
+	//	fmt.Printf("%+v\n", cfg)
 
 	/* choose provider */
 	p := github.NewProvider(cfg.From, "tag")
@@ -37,8 +37,8 @@ func main() {
 	/* set up cron job */
 	ticker := time.Tick(time.Duration(cfg.Interval) * time.Second)
 
-	regex := `^ARG VERSION=[0-9]*\.[0-9]*\.[0-9]*.*`
-	format := "ARG VERSION=%s\n"
+	regex := `ARG VERSION=[0-9]*\.[0-9]*\.[0-9]*.*`
+	format := `ARG VERSION=%s`
 	filePattern := `.*Dockerfile.*`
 	const tmpPath string = "/tmp/tagtrooper/"
 
@@ -71,7 +71,7 @@ func main() {
 		/* check for update */
 		if p.Check() {
 			/* trigger action */
-			fmt.Printf("New tag for repository %s (%s)", cfg.From, t)
+			fmt.Printf("New tag for repository %s (%s)\n", cfg.From, t)
 
 			tag := p.PrintLatestTag()
 			if tag == "" {

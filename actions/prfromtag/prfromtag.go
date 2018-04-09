@@ -94,36 +94,29 @@ func New(url string, dir string, regex string, format string, filePattern string
 func (repo *Repository) Run(tag string) (err error) {
 
 	/* fetch updates */
+	fmt.Println("Fetching origin")
 	err = repo.r.Fetch(&git.FetchOptions{})
-	if err != nil && err != git.NoErrAlreadyUpToDate {
-		fmt.Printf("Failed to fetch repo: %s\n", err)
-		return
+	if err != nil {
+		if err == git.NoErrAlreadyUpToDate {
+			fmt.Println("Repo already up to date")
+		} else {
+			fmt.Printf("Failed to fetch repo: %s\n", err)
+			return
+		}
 	}
 
-	/* create new branch */
-	branchName := tag
+	branchName := fmt.Sprintf("tt-%s", tag)
 	w, err := repo.r.Worktree()
 	if err != nil {
 		fmt.Printf("Failed to get worktree: %s", err)
 		return
 	}
 
-	headRef, err := repo.r.Head()
-	if err != nil {
-		fmt.Printf("%s\n", err)
-		return
-	}
-
-	ref := plumbing.NewHashReference(
-		plumbing.ReferenceName("refs/heads/"+branchName),
-		headRef.Hash(),
-	)
-
-	err = repo.r.Storer.SetReference(ref)
-	if err != nil {
-		fmt.Printf("Failed to create branch %s on hash %s: %s\n", branchName, headRef.Hash(), err)
-		return
-	}
+	// headRef, err := repo.r.Head()
+	// if err != nil {
+	// 	fmt.Printf("%s\n", err)
+	// 	return
+	// }
 
 	/* updated version */
 	files := repo.updateVersionInAllDockerfiles(tag)
@@ -133,12 +126,8 @@ func (repo *Repository) Run(tag string) (err error) {
 		return
 	}
 
-	if len(files) == 0 {
-		fmt.Printf("Error: no files modified!\n")
-		return
-	}
-
 	for _, f := range files {
+		fmt.Println("Adding file", f)
 		w.Add(f)
 	}
 
@@ -151,6 +140,8 @@ func (repo *Repository) Run(tag string) (err error) {
 		fmt.Printf("Error: no files modified!\n")
 		return
 	}
+
+	fmt.Print(status.String())
 
 	/* commit */
 	commit, err := w.Commit("Update to tag "+tag, &git.CommitOptions{
@@ -165,29 +156,43 @@ func (repo *Repository) Run(tag string) (err error) {
 		return
 	}
 
+	/* create new branch */
+	branchRef := plumbing.NewHashReference(
+		plumbing.ReferenceName("refs/heads/"+branchName),
+		commit,
+	)
+	err = repo.r.Storer.SetReference(branchRef)
+	if err != nil {
+		fmt.Printf("Failed to create branch %s on hash %s: %s\n", branchName, commit, err)
+		return
+	}
+
 	/* create new tag */
-	n := plumbing.ReferenceName("refs/tags/" + tag)
-	t := plumbing.NewHashReference(n, commit)
-	err = repo.r.Storer.SetReference(t)
+	tagRef := plumbing.NewHashReference(
+		plumbing.ReferenceName("refs/tags/"+tag),
+		commit,
+	)
+	err = repo.r.Storer.SetReference(tagRef)
 	if err != nil {
 		fmt.Printf("Failed to create tag %s on hash %s: %s\n", tag, commit, err)
 		return
 	}
 
-	/* push branch */
+	/* push */
 	auth := http.BasicAuth{
 		Username: repo.username,
 		Password: repo.apiToken,
 	}
 
-	upstreamReference := plumbing.ReferenceName("refs/heads/" + branchName)
-	downstreamReference := plumbing.ReferenceName("refs/heads/" + branchName)
+	branchRefName := "refs/heads/" + branchName
+	tagRefName := "refs/tags/" + tag
+
 	referenceList := append([]config.RefSpec{},
-		config.RefSpec(upstreamReference+":"+downstreamReference),
+		config.RefSpec(plumbing.ReferenceName(branchRefName)+":"+plumbing.ReferenceName(branchRefName)),
+		config.RefSpec(plumbing.ReferenceName(tagRefName)+":"+plumbing.ReferenceName(tagRefName)),
 	)
 
 	err = repo.r.Push(&git.PushOptions{
-		// RemoteName: branchName,
 		RefSpecs: referenceList,
 		Auth:     &auth,
 	})
@@ -203,11 +208,13 @@ func (repo *Repository) Run(tag string) (err error) {
 	tc := oauth2.NewClient(oauth2.NoContext, ts)
 	client := github.NewClient(tc)
 
+	msg := fmt.Sprintf("Update to %s\n -- Your loyal tag trooper", tag)
+
 	pull := newPullRequest(
 		"Update to "+tag,
 		branchName,
 		"master",
-		"Your loyal tag trooper",
+		msg,
 	)
 
 	pr, _, err := client.PullRequests.Create(context.Background(), repo.owner, repo.name, pull)
@@ -257,25 +264,14 @@ func (repo *Repository) updateVersionInAllDockerfiles(version string) (files []s
 			return nil
 		}
 
-		fmt.Printf("Found Dockerfile: '%s'\n", fi.Name())
+		fmt.Printf("Matching file: '%s'\n", fi.Name())
+
+		err = replaceMatchingLinesInFile(path, repo.regexp, newLine)
+		if err != nil {
+			return nil
+		}
 		files = append(files, path)
 
-		lines, err := readLines(path)
-		if err != nil {
-			fmt.Printf("Failed to read from file %s: %s\n", path, err)
-			return err
-		}
-
-		/* loop over all lines */
-		for n, l := range lines {
-			lines[n] = repo.regexp.ReplaceAllString(l, newLine)
-		}
-
-		err = writeLines(lines, path)
-		if err != nil {
-			fmt.Printf("Failed to write to file %s: %s\n", path, err)
-			return err
-		}
 		return nil
 	}
 
@@ -283,6 +279,28 @@ func (repo *Repository) updateVersionInAllDockerfiles(version string) (files []s
 	filepath.Walk(".", callback)
 
 	return files
+}
+
+func replaceMatchingLinesInFile(path string, regexp *regexp.Regexp, newLine string) (err error) {
+	lines, err := readLines(path)
+	if err != nil {
+		fmt.Printf("Failed to read from file %s: %s\n", path, err)
+		return err
+	}
+
+	/* loop over all lines */
+	for i := 0; i < len(lines); i++ {
+		lines[i] = regexp.ReplaceAllString(lines[i], newLine)
+		fmt.Println(lines[i])
+	}
+
+	err = writeLines(lines, path)
+	if err != nil {
+		fmt.Printf("Failed to write to file %s: %s\n", path, err)
+		return err
+	}
+
+	return nil
 }
 
 func readLines(path string) ([]string, error) {
