@@ -72,8 +72,8 @@ func New(url string, dir string, regex string, format string, filePattern string
 
 	/* initial clone */
 	r, err := git.PlainClone(dir, false, &git.CloneOptions{
-		URL:   url,
-		Depth: 1,
+		URL: url,
+		//		Depth: 1, /* disable due to https://github.com/src-d/go-git/issues/802 */
 	})
 	if err == git.ErrRepositoryAlreadyExists {
 		r, err = git.PlainOpen(dir)
@@ -94,15 +94,17 @@ func New(url string, dir string, regex string, format string, filePattern string
 func (repo *Repository) Run(tag string) (err error) {
 
 	/* fetch updates */
-	fmt.Println("Fetching origin")
+	fmt.Print("Fetching origin... ")
 	err = repo.r.Fetch(&git.FetchOptions{})
 	if err != nil {
 		if err == git.NoErrAlreadyUpToDate {
 			fmt.Println("Repo already up to date")
 		} else {
-			fmt.Printf("Failed to fetch repo: %s\n", err)
+			fmt.Printf("failed: %s\n", err)
 			return
 		}
+	} else {
+		fmt.Println("ok")
 	}
 
 	branchName := fmt.Sprintf("tt-%s", tag)
@@ -119,7 +121,7 @@ func (repo *Repository) Run(tag string) (err error) {
 	// }
 
 	/* updated version */
-	files := repo.updateVersionInAllDockerfiles(tag)
+	files := repo.updateVersionInAllFiles(tag)
 	// err = repo.execUpdater(tag)
 	if err != nil {
 		fmt.Printf("Failed to execute: %s\n", err)
@@ -127,7 +129,7 @@ func (repo *Repository) Run(tag string) (err error) {
 	}
 
 	for _, f := range files {
-		fmt.Println("Adding file", f)
+		// fmt.Println("Adding file", f)
 		w.Add(f)
 	}
 
@@ -251,11 +253,15 @@ func (repo *Repository) execUpdater(tag string) (err error) {
 	return nil
 }
 
-func (repo *Repository) updateVersionInAllDockerfiles(version string) (files []string) {
+func (repo *Repository) updateVersionInAllFiles(version string) (files []string) {
 	newLine := fmt.Sprintf(repo.format, version)
 
 	/* replace regex */
 	callback := func(path string, fi os.FileInfo, err error) error {
+		if fi.Name() == ".git" {
+			return filepath.SkipDir
+		}
+
 		if fi.IsDir() {
 			return nil
 		}
@@ -291,7 +297,7 @@ func replaceMatchingLinesInFile(path string, regexp *regexp.Regexp, newLine stri
 	/* loop over all lines */
 	for i := 0; i < len(lines); i++ {
 		lines[i] = regexp.ReplaceAllString(lines[i], newLine)
-		fmt.Println(lines[i])
+		// fmt.Println(lines[i])
 	}
 
 	err = writeLines(lines, path)
